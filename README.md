@@ -101,7 +101,7 @@ python run_live.py --symbol AAPL --strategy template --timeframe 1Min --sleep 5 
 ## Backtest Mode
 
 ```bash
-python run_backtest.py --csv data/AAPL_1Min_stock_alpaca_clean.csv --strategy ma --plot
+python3 run_backtest.py --csv data/legacy/clean_data_stock/AAPL_1m_clean.csv --strategy ma --plot
 ```
 
 ---
@@ -125,7 +125,7 @@ class MyStrategy(Strategy):
         df.loc[df['Close'] > df['sma'], 'signal'] = 1
         df.loc[df['Close'] < df['sma'], 'signal'] = -1
         df['position'] = df['signal']
-        df['target_qty'] = self.position_size
+        df['target_qty'] = self.position_sizes
         return df
 ```
 
