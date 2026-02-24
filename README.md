@@ -102,7 +102,9 @@ python run_live.py --symbol AAPL --strategy template --timeframe 1Min --sleep 5 
 
 ```bash
 python3 run_backtest.py --csv data/legacy/clean_data_stock/AAPL_1m_clean.csv --strategy ma --plot
-```
+``` or
+python3 run_backtest.py --csv data/AAPL_15Min_stock_alpaca_clean.csv --strategy mystrategy --plot
+
 
 ---
 

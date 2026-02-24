@@ -12,6 +12,7 @@ from .strategy_base import (
     MovingAverageStrategy,
     Strategy,
     TemplateStrategy,
+    MyStrategy,
 )
 
 
@@ -30,8 +31,10 @@ def _build_registry() -> Dict[str, Type[Strategy]]:
     registry.setdefault("crypto", CryptoTrendStrategy)
     registry.setdefault("crypto_trend", CryptoTrendStrategy)
     registry.setdefault("crypto_trend_ema", CryptoTrendStrategy)
+    registry.setdefault("mystrategy", MyStrategy)    
     registry.setdefault("demo", DemoStrategy)
     registry.setdefault("fast", DemoStrategy)
+    
     return registry
 
 
@@ -58,6 +61,7 @@ __all__ = [
     "MovingAverageStrategy",
     "CryptoTrendStrategy",
     "DemoStrategy",
+    "MyStrategy",          
     "get_strategy_class",
     "list_strategies",
 ]

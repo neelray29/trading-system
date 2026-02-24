@@ -109,6 +109,8 @@ class TemplateStrategy(Strategy):
     logic to build your own ideas.
     """
 
+    
+
     def __init__(
         self,
         lookback: int = 14,
@@ -140,6 +142,7 @@ class TemplateStrategy(Strategy):
 
         df["position"] = df["signal"].replace(0, np.nan).ffill().fillna(0)
         df["target_qty"] = df["position"].abs() * self.position_size
+        print("1")
         return df
 
 
@@ -203,127 +206,112 @@ class DemoStrategy(Strategy):
 ##
 ## Example: RSI Strategy
 ##
-class RSIStrategy(Strategy):
-    """Buy when RSI is oversold, sell when overbought."""
+## class RSIStrategy(Strategy):
+##     """Buy when RSI is oversold, sell when overbought."""
+##
+##     def __init__(self, period=14, oversold=30, overbought=70, position_size=10.0):
+##         self.period = period
+##         self.oversold = oversold
+##         self.overbought = overbought
+##         self.position_size = position_size
+##
+##     def add_indicators(self, df):
+##         delta = df['Close'].diff()
+##         gain = delta.where(delta > 0, 0).rolling(self.period).mean()
+##         loss = (-delta.where(delta < 0, 0)).rolling(self.period).mean()
+##         rs = gain / loss
+##         df['RSI'] = 100 - (100 / (1 + rs))
+##         return df
+##
+##     def generate_signals(self, df):
+##         df['signal'] = 0
+##         df.loc[df['RSI'] < self.oversold, 'signal'] = 1   # Buy when oversold
+##         df.loc[df['RSI'] > self.overbought, 'signal'] = -1  # Sell when overbought
+##         df['position'] = df['signal'].replace(0, np.nan).ffill().fillna(0)
+##         df['target_qty'] = self.position_size
+##         return df
+##
+## To use your strategy:
+##   python run_live.py --symbol AAPL --strategy mystrategy --live
+##
 
-    def __init__(self, period=14, oversold=30, overbought=70, position_size=10.0):
-        self.period = period
-        self.oversold = oversold
-        self.overbought = overbought
-        self.position_size = position_size
 
-    def add_indicators(self, df):
+
+class MyStrategy(Strategy):
+    """
+    Bollinger Bands + RSI "Hook" Strategy with Volatility-Adjusted Sizing.
+    Dynamically changes share count based on current market volatility.
+    """
+
+    def __init__(
+        self, 
+        bb_window: int = 20, 
+        num_std: float = 2.0, 
+        rsi_window: int = 14,
+        rsi_oversold: float = 30.0,
+        rsi_overbought: float = 70.0,
+        target_risk: float = 100.0 # <--- NEW: Dollars to risk per trade
+    ):
+        self.bb_window = bb_window
+        self.num_std = num_std
+        self.rsi_window = rsi_window
+        self.rsi_oversold = rsi_oversold
+        self.rsi_overbought = rsi_overbought
+        self.target_risk = target_risk
+
+    def add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        df['sma'] = df['Close'].rolling(self.bb_window).mean()
+        df['std'] = df['Close'].rolling(self.bb_window).std()
+        df['upper_band'] = df['sma'] + (df['std'] * self.num_std)
+        df['lower_band'] = df['sma'] - (df['std'] * self.num_std)
+        
         delta = df['Close'].diff()
-        gain = delta.where(delta > 0, 0).rolling(self.period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(self.period).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        
+        avg_gain = gain.ewm(com=self.rsi_window - 1, min_periods=self.rsi_window).mean()
+        avg_loss = loss.ewm(com=self.rsi_window - 1, min_periods=self.rsi_window).mean()
+        
+        rs = avg_gain / avg_loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
         return df
 
-    def generate_signals(self, df):
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        prev_rsi = df['rsi'].shift(1)
+        
+        rsi_hook_down = (prev_rsi >= self.rsi_overbought) & (df['rsi'] < self.rsi_overbought)
+        rsi_hook_up = (prev_rsi <= self.rsi_oversold) & (df['rsi'] > self.rsi_oversold)
+        
+        buy_condition = (df['Close'] < df['sma']) & rsi_hook_up
+        sell_condition = (df['Close'] > df['sma']) & rsi_hook_down
+        
+        exit_long = df['Close'] > df['upper_band']
+        exit_short = df['Close'] < df['lower_band']
+        
+        df['target_position'] = np.nan
+        df.loc[exit_long | exit_short, 'target_position'] = 0
+        df.loc[buy_condition, 'target_position'] = 1
+        df.loc[sell_condition, 'target_position'] = -1
+        
+        df['position'] = df['target_position'].ffill().fillna(0)
+        
+        position_change = df['position'].diff().fillna(0)
         df['signal'] = 0
-        df.loc[df['RSI'] < self.oversold, 'signal'] = 1   # Buy when oversold
-        df.loc[df['RSI'] > self.overbought, 'signal'] = -1  # Sell when overbought
-        df['position'] = df['signal'].replace(0, np.nan).ffill().fillna(0)
-        df['target_qty'] = self.position_size
+        df.loc[position_change > 0, 'signal'] = 1
+        df.loc[position_change < 0, 'signal'] = -1
+        
+        # --- NEW ADAPTIVE SIZING LOGIC ---
+        # 1. Calculate the distance from the SMA to the outer band
+        risk_per_share = df['std'] * self.num_std
+        
+        # 2. Prevent dividing by zero if volatility is flat
+        risk_per_share = risk_per_share.replace(0, np.nan)
+        
+        # 3. Calculate target shares (Target Risk / Risk per share) and round to a whole number
+        calculated_shares = (self.target_risk / risk_per_share).round(0)
+        
+        # 4. Apply the shares only when we hold a position
+        df['target_qty'] = calculated_shares.fillna(0) * df['position'].abs()
+        
         return df
-
-# To use your strategy:
-#   python run_live.py --symbol AAPL --strategy mystrategy --live
-
-
-# class ASMLTSMCPairsStrategy(Strategy):
-#     """
-#     Pairs trading strategy between ASML and TSMC.
-    
-#     Long spread:
-#         Buy ASML, short beta * TSMC
-#     Short spread:
-#         Short ASML, long beta * TSMC
-#     """
-
-#     def __init__(
-#         self,
-#         lookback: int = 60,
-#         entry_z: float = 2.0,
-#         exit_z: float = 0.5,
-#         rsi_period: int = 7,
-#         use_rsi: bool = True,
-#         position_size: float = 10.0,
-#     ):
-#         self.lookback = lookback
-#         self.entry_z = entry_z
-#         self.exit_z = exit_z
-#         self.rsi_period = rsi_period
-#         self.use_rsi = use_rsi
-#         self.position_size = position_size
-
-#     def add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-#         # Rolling hedge ratio (beta)
-#         cov = (
-#             df["Close_ASML"]
-#             .rolling(self.lookback)
-#             .cov(df["Close_TSMC"])
-#         )
-#         var = df["Close_TSMC"].rolling(self.lookback).var()
-
-#         df["beta"] = cov / var
-
-#         # Spread
-#         df["spread"] = df["Close_ASML"] - df["beta"] * df["Close_TSMC"]
-
-#         # Z-score of spread
-#         spread_mean = df["spread"].rolling(self.lookback).mean()
-#         spread_std = df["spread"].rolling(self.lookback).std()
-
-#         df["zscore"] = (df["spread"] - spread_mean) / spread_std
-
-#         # Optional RSI on spread
-#         if self.use_rsi:
-#             delta = df["spread"].diff()
-#             gain = delta.where(delta > 0, 0).rolling(self.rsi_period).mean()
-#             loss = (-delta.where(delta < 0, 0)).rolling(self.rsi_period).mean()
-#             rs = gain / loss
-#             df["RSI"] = 100 - (100 / (1 + rs))
-
-#         return df
-
-#     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-#         df["signal"] = 0
-#         df["position"] = 0
-
-#         long_entry = df["zscore"] < -self.entry_z
-#         short_entry = df["zscore"] > self.entry_z
-
-#         if self.use_rsi:
-#             long_entry &= df["RSI"] < 40
-#             short_entry &= df["RSI"] > 60
-
-#         exit_long = df["zscore"] > -self.exit_z
-#         exit_short = df["zscore"] < self.exit_z
-
-#         position = 0
-#         positions = []
-
-#         for i in range(len(df)):
-#             if position == 0:
-#                 if long_entry.iloc[i]:
-#                     position = 1
-#                 elif short_entry.iloc[i]:
-#                     position = -1
-#             elif position == 1 and exit_long.iloc[i]:
-#                 position = 0
-#             elif position == -1 and exit_short.iloc[i]:
-#                 position = 0
-
-#             positions.append(position)
-
-#         df["position"] = positions
-
-#         # Signal when position changes
-#         df["signal"] = df["position"].diff().fillna(0)
-
-#         df["target_qty"] = df["position"].abs() * self.position_size
-
-#         return df
-    
