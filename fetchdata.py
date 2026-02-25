@@ -1,6 +1,6 @@
 from pipeline.alpaca import fetch_stock_bars, save_bars, clean_market_data
 
-symbol = 'TSLA'
+symbol = 'GME'
 timeframe = '5Min'
 limit = 80000
 

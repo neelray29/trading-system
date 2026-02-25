@@ -315,3 +315,5 @@ class MyStrategy(Strategy):
         df['target_qty'] = calculated_shares.fillna(0) * df['position'].abs()
         
         return df
+    
+    
