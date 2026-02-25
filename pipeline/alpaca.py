@@ -125,24 +125,33 @@ def _normalize_bars(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 def fetch_stock_bars(
     symbol: str,
     timeframe: str = "1Min",
-    limit: int = 1000,
+    limit: Optional[int] = 1000,
     feed: Optional[str] = None,
     fallback_days: int = DEFAULT_FALLBACK_DAYS,
     api: Optional[tradeapi.REST] = None,
+    start: Optional[pd.Timestamp] = None,
+    end: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     api = api or get_rest()
     feed = feed or os.environ.get("ALPACA_DATA_FEED", DEFAULT_DATA_FEED)
     tf = _parse_timeframe(timeframe)
-    bars = api.get_bars(symbol, tf, limit=limit, feed=feed).df
+    kwargs = dict(feed=feed)
+    if limit:
+        kwargs["limit"] = limit
+    if start:
+        kwargs["start"] = _to_rfc3339(pd.Timestamp(start, tz="UTC"))
+    if end:
+        kwargs["end"] = _to_rfc3339(pd.Timestamp(end, tz="UTC"))
+        bars = api.get_bars(symbol, tf, **kwargs).df
     df = _normalize_bars(bars, symbol)
     if df.empty and fallback_days > 0:
-        end = pd.Timestamp.now(tz="UTC")
-        start = end - pd.Timedelta(days=fallback_days)
+        end_ts = pd.Timestamp.now(tz="UTC")
+        start_ts = end_ts - pd.Timedelta(days=fallback_days)
         bars = api.get_bars(
             symbol,
             tf,
-            start=_to_rfc3339(start),
-            end=_to_rfc3339(end),
+            start=_to_rfc3339(start_ts),
+            end=_to_rfc3339(end_ts),
             limit=limit,
             feed=feed,
         ).df
