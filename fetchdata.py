@@ -30,10 +30,10 @@ def fetch_bars_chunked(symbol, timeframe='1Min', days=90):
     result = pd.concat(all_dfs).drop_duplicates().sort_values('Datetime')
     return result
 
-symbol = 'TSLA'
-timeframe = '1Min'
+symbol = 'SPY'
+timeframe = '1hour'
 
-raw_df = fetch_bars_chunked(symbol, timeframe=timeframe, days=90)
+raw_df = fetch_bars_chunked(symbol, timeframe=timeframe, days=180)
 raw_path = save_bars(raw_df, symbol, timeframe, asset_class='stock')
 clean_path = clean_market_data(raw_path)
 print("Raw:", raw_path)

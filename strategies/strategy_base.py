@@ -238,107 +238,141 @@ class DemoStrategy(Strategy):
 
 
 
-    
 class MyStrategy(Strategy):
     """
-    Z-Score Mean Reversion Strategy.
+    Regime-Switching Strategy: Mean Reversion + Trend Pullback.
 
-    Core logic:
-      1. MEAN          - Rolling SMA as the reference price level
-      2. DEVIATION     - Z-score (standard deviations from mean) to measure how far price has strayed
-      3. ENTRY         - Enter long when Z-score < -entry_z (oversold), short when Z-score > +entry_z (overbought)
-      4. EXIT/PROFIT   - Close position when Z-score crosses back through exit_z toward zero (partial reversion)
-      5. STOP LOSS     - Hard stop at stop_z standard deviations AND time-based stop after max_hold_periods bars
-      6. ASSET FIT     - Best on range-bound, liquid instruments; avoid during strong trend regimes (ADX filter)
-      7. LOOKBACK      - Configurable window (default 30); key parameter to tune per instrument
-      8. POSITION SIZE - Scales position size UP as Z-score grows (fade into the move gradually)
+    Automatically detects market regime using ADX and switches behavior:
 
-    Parameters:
-        lookback        : int   - Rolling window for mean and std (principle 7). Default 30.
-        entry_z         : float - Z-score threshold to enter a trade (principle 3). Default 2.0.
-        exit_z          : float - Z-score threshold to exit / take profit (principle 4). Default 0.5.
-        stop_z          : float - Z-score hard stop loss threshold (principle 5). Default 3.5.
-        max_hold_periods: int   - Time-based stop: exit if not reverted within N bars (principle 5). Default 20.
-        base_position   : float - Base number of shares/units at exactly entry_z (principle 8). Default 10.0.
-        max_position    : float - Maximum position cap to prevent runaway scaling (principle 8). Default 30.0.
-        adx_filter      : bool  - If True, skip entries when trend is strong (ADX > adx_threshold) (principle 6).
-        adx_threshold   : float - ADX level above which we consider the market trending. Default 25.0.
-        adx_window      : int   - Window for ADX calculation. Default 14.
+      RANGING REGIME  (ADX < adx_range_max):
+        - Pure mean reversion mode
+        - Trades both long and short
+        - Enters when Z-score deviates beyond entry_z in either direction
+        - Bets that price will snap back to the mean
 
-    Usage:
-        python run_backtest.py --csv data/AAPL_15Min_stock_alpaca_clean.csv --strategy ZScoreMeanReversionStrategy --plot
-        python run_live.py --symbol AAPL --strategy ZScoreMeanReversionStrategy --live
+      TRANSITION ZONE (adx_range_max <= ADX <= adx_trend_min):
+        - Sit out — market is ambiguous
+        - No new entries
+
+      TRENDING REGIME (ADX > adx_trend_min):
+        - Trend pullback mode
+        - Only trades IN the direction of the long-term EMA trend
+        - Enters on pullbacks toward the mean (Z-score entry timing)
+        - Bets that price will resume the trend after a pullback
+
+    Exits (same for both regimes):
+      1. Take profit  - Z-score reverts through exit_z
+      2. Trend exit   - Price crosses trend EMA (trending mode only)
+      3. Hard stop    - Z-score hits stop_z
+      4. Time stop    - Open more than max_hold_periods bars
+      5. Dollar stop  - Trade down more than max_loss_per_trade dollars
+
+    Recommended parameters for JPM 15-min:
+        trend_window        = 50
+        lookback            = 30
+        entry_z             = 1.8
+        exit_z              = 0.4
+        stop_z              = 2.8
+        max_hold_periods    = 8
+        max_loss_per_trade  = 75.0
+        base_position       = 10.0
+        max_position        = 15.0
+        adx_range_max       = 20.0   (below this = ranging, use mean reversion)
+        adx_trend_min       = 28.0   (above this = trending, use trend pullback)
+
+    Recommended parameters for JPM 5-min:
+        trend_window        = 100
+        lookback            = 40
+        entry_z             = 2.0
+        exit_z              = 0.4
+        stop_z              = 2.8
+        max_hold_periods    = 10
+        max_loss_per_trade  = 50.0
+        base_position       = 10.0
+        max_position        = 15.0
+        adx_range_max       = 20.0
+        adx_trend_min       = 28.0
     """
 
     def __init__(
         self,
+        trend_window: int = 50,
         lookback: int = 30,
-        entry_z: float = 2.0,
-        exit_z: float = 0.5,
-        stop_z: float = 3.5,
-        max_hold_periods: int = 20,
+        entry_z: float = 1.8,
+        exit_z: float = 0.4,
+        stop_z: float = 2.8,
+        max_hold_periods: int = 8,
+        max_loss_per_trade: float = 75.0,
         base_position: float = 10.0,
-        max_position: float = 30.0,
-        adx_filter: bool = True,
-        adx_threshold: float = 25.0,
+        max_position: float = 15.0,
+        adx_range_max: float = 20.0,
+        adx_trend_min: float = 28.0,
         adx_window: int = 14,
     ):
         if lookback < 2:
             raise ValueError("lookback must be at least 2.")
+        if trend_window <= lookback:
+            raise ValueError("trend_window must be greater than lookback.")
         if not (0 < exit_z < entry_z < stop_z):
             raise ValueError("Must satisfy: 0 < exit_z < entry_z < stop_z.")
         if base_position <= 0 or max_position < base_position:
             raise ValueError("base_position must be positive and <= max_position.")
+        if max_loss_per_trade <= 0:
+            raise ValueError("max_loss_per_trade must be positive.")
+        if adx_range_max >= adx_trend_min:
+            raise ValueError("adx_range_max must be less than adx_trend_min.")
 
+        self.trend_window = trend_window
         self.lookback = lookback
         self.entry_z = entry_z
         self.exit_z = exit_z
         self.stop_z = stop_z
         self.max_hold_periods = max_hold_periods
+        self.max_loss_per_trade = max_loss_per_trade
         self.base_position = base_position
         self.max_position = max_position
-        self.adx_filter = adx_filter
-        self.adx_threshold = adx_threshold
+        self.adx_range_max = adx_range_max
+        self.adx_trend_min = adx_trend_min
         self.adx_window = adx_window
 
     # ------------------------------------------------------------------
-    # Principle 1 & 2: Mean + Deviation via Z-score
+    # Indicators
     # ------------------------------------------------------------------
     def add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        # Rolling mean (the "reference" level) and standard deviation
-        df["mr_mean"] = df["Close"].rolling(self.lookback).mean()
-        df["mr_std"] = df["Close"].rolling(self.lookback).std()
+        # Long-term EMA for trend direction
+        df["trend_ema"] = df["Close"].ewm(span=self.trend_window, adjust=False).mean()
+        df["trend_dir"] = np.where(df["Close"] > df["trend_ema"], 1, -1)
 
-        # Z-score: how many standard deviations is price from its mean?
+        # Short-term Z-score for entry timing
+        df["mr_mean"] = df["Close"].rolling(self.lookback).mean()
+        df["mr_std"]  = df["Close"].rolling(self.lookback).std()
         df["z_score"] = (df["Close"] - df["mr_mean"]) / df["mr_std"].replace(0, np.nan)
 
-        # Principle 6: ADX trend filter — skip entries in trending markets
-        if self.adx_filter:
-            df = self._add_adx(df)
-        else:
-            df["adx"] = 0.0  # Always pass filter if disabled
+        # ADX for regime detection
+        df = self._add_adx(df)
+
+        # Regime label for clarity
+        df["regime"] = "transition"
+        df.loc[df["adx"] < self.adx_range_max, "regime"]  = "ranging"
+        df.loc[df["adx"] > self.adx_trend_min, "regime"]  = "trending"
 
         return df
 
     def _add_adx(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate Average Directional Index (ADX) to detect trending markets."""
         high, low, close = df["High"], df["Low"], df["Close"]
         w = self.adx_window
 
-        # True Range
         tr = pd.concat([
             high - low,
             (high - close.shift(1)).abs(),
-            (low - close.shift(1)).abs(),
+            (low  - close.shift(1)).abs(),
         ], axis=1).max(axis=1)
 
-        # Directional movements
         dm_plus  = ((high - high.shift(1)).clip(lower=0)
                     .where((high - high.shift(1)) > (low.shift(1) - low), 0.0))
         dm_minus = ((low.shift(1) - low).clip(lower=0)
                     .where((low.shift(1) - low) > (high - high.shift(1)), 0.0))
 
-        # Smoothed with Wilder's EMA (com = window - 1)
         atr      = tr.ewm(com=w - 1, min_periods=w).mean()
         di_plus  = 100 * dm_plus.ewm(com=w - 1, min_periods=w).mean() / atr.replace(0, np.nan)
         di_minus = 100 * dm_minus.ewm(com=w - 1, min_periods=w).mean() / atr.replace(0, np.nan)
@@ -349,68 +383,106 @@ class MyStrategy(Strategy):
         return df
 
     # ------------------------------------------------------------------
-    # Principles 3, 4, 5, 8: Entry, Exit, Stop, and Adaptive Sizing
+    # Signals
     # ------------------------------------------------------------------
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        df["signal"]   = 0
-        df["position"] = 0.0
+        df["signal"]     = 0
+        df["position"]   = 0.0
         df["target_qty"] = 0.0
 
-        # Track current position state across rows
-        current_position = 0       # +1 long, -1 short, 0 flat
-        bars_in_trade    = 0       # time-based stop counter
+        current_position = 0
+        bars_in_trade    = 0
+        entry_price      = 0.0
 
-        positions  = []
-        signals    = []
+        positions   = []
+        signals     = []
         target_qtys = []
 
         for i in range(len(df)):
-            z       = df["z_score"].iloc[i]
-            adx_val = df["adx"].iloc[i]
-            signal  = 0
+            z             = df["z_score"].iloc[i]
+            adx_val       = df["adx"].iloc[i]
+            trend_dir     = df["trend_dir"].iloc[i]
+            current_price = df["Close"].iloc[i]
+            trend_ema     = df["trend_ema"].iloc[i]
+            regime        = df["regime"].iloc[i]
+            signal        = 0
+
+            # Warm-up guard
+            warmed_up = i >= self.trend_window
 
             # --- Manage open position ---
             if current_position != 0:
                 bars_in_trade += 1
 
-                # Principle 4: Take profit — price has reverted toward the mean
+                # Exit 1: Take profit
                 reverted = (
                     (current_position ==  1 and z >= -self.exit_z) or
                     (current_position == -1 and z <=  self.exit_z)
                 )
-                # Principle 5a: Hard stop — Z-score moved further against us
+
+                # Exit 2: Trend exit (only meaningful in trending regime)
+                trend_exit = (
+                    regime == "trending" and (
+                        (current_position ==  1 and current_price < trend_ema) or
+                        (current_position == -1 and current_price > trend_ema)
+                    )
+                )
+
+                # Exit 3: Hard Z-score stop
                 hard_stop = (
                     (current_position ==  1 and z <= -self.stop_z) or
                     (current_position == -1 and z >=  self.stop_z)
                 )
-                # Principle 5b: Time-based stop
+
+                # Exit 4: Time stop
                 time_stop = bars_in_trade >= self.max_hold_periods
 
-                if reverted or hard_stop or time_stop:
-                    signal = -current_position   # close the position
+                # Exit 5: Dollar stop
+                trade_pnl   = (current_price - entry_price) * current_position * self.base_position
+                dollar_stop = trade_pnl <= -self.max_loss_per_trade
+
+                if reverted or trend_exit or hard_stop or time_stop or dollar_stop:
+                    signal           = -current_position
                     current_position = 0
-                    bars_in_trade = 0
+                    bars_in_trade    = 0
+                    entry_price      = 0.0
 
-            # --- Look for new entry (only when flat) ---
-            if current_position == 0:
-                # Principle 6: Skip entry if market is trending strongly
-                trending = self.adx_filter and (adx_val > self.adx_threshold)
+            # --- Look for new entry ---
+            if current_position == 0 and warmed_up and not np.isnan(z):
 
-                if not trending and not np.isnan(z):
-                    # Principle 3: Enter when Z-score exceeds entry threshold
+                # RANGING REGIME: pure mean reversion, trade both directions
+                if regime == "ranging":
                     if z <= -self.entry_z:
-                        signal = 1                # price too low → buy
+                        signal           = 1
                         current_position = 1
-                        bars_in_trade = 0
+                        bars_in_trade    = 0
+                        entry_price      = current_price
                     elif z >= self.entry_z:
-                        signal = -1               # price too high → sell short
+                        signal           = -1
                         current_position = -1
-                        bars_in_trade = 0
+                        bars_in_trade    = 0
+                        entry_price      = current_price
 
-            # Principle 8: Scale position size with |Z-score| (fade into the move)
+                # TRENDING REGIME: only trade in direction of trend
+                elif regime == "trending":
+                    if trend_dir == 1 and z <= -self.entry_z:
+                        signal           = 1
+                        current_position = 1
+                        bars_in_trade    = 0
+                        entry_price      = current_price
+                    elif trend_dir == -1 and z >= self.entry_z:
+                        signal           = -1
+                        current_position = -1
+                        bars_in_trade    = 0
+                        entry_price      = current_price
+
+                # TRANSITION ZONE: sit out
+                # (no entry logic needed, just skip)
+
+            # Adaptive sizing: scales with Z-score magnitude
             if current_position != 0 and not np.isnan(z):
-                scale = abs(z) / self.entry_z          # 1.0 at entry_z, grows beyond
-                qty = min(self.base_position * scale, self.max_position)
+                scale = abs(z) / self.entry_z
+                qty   = min(self.base_position * scale, self.max_position)
             else:
                 qty = 0.0
 
